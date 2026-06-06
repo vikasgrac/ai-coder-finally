@@ -14,8 +14,8 @@ This is the capstone project for an agentic AI coding course. It is built entire
 
 The user runs a single Docker command (or a provided start script). A browser opens to `http://localhost:8000`. No login, no signup. They immediately see:
 
-- A watchlist of 10 default tickers with live-updating prices in a grid
-- $10,000 in virtual cash
+- A watchlist of 10 default NSE tickers with live-updating prices in a grid
+- ₹1,00,000 in virtual cash
 - A dark, data-rich trading terminal aesthetic
 - An AI chat panel ready to assist
 
@@ -88,7 +88,7 @@ The user runs a single Docker command (or a provided start script). A browser op
 finally/
 ├── frontend/                 # Next.js TypeScript project (static export)
 ├── backend/                  # FastAPI uv project (Python)
-│   └── db/                   # Schema definitions, seed data, migration logic
+│   └── schema/               # Schema SQL definitions, seed data, migration logic
 ├── planning/                 # Project-wide documentation for agents
 │   ├── PLAN.md               # This document
 │   └── ...                   # Additional agent reference docs
@@ -101,7 +101,6 @@ finally/
 ├── db/                       # Volume mount target (SQLite file lives here at runtime)
 │   └── .gitkeep              # Directory exists in repo; finally.db is gitignored
 ├── Dockerfile                # Multi-stage build (Node → Python)
-├── docker-compose.yml        # Optional convenience wrapper
 ├── .env                      # Environment variables (gitignored, .env.example committed)
 └── .gitignore
 ```
@@ -110,7 +109,7 @@ finally/
 
 - **`frontend/`** is a self-contained Next.js project. It knows nothing about Python. It talks to the backend via `/api/*` endpoints and `/api/stream/*` SSE endpoints. Internal structure is up to the Frontend Engineer agent.
 - **`backend/`** is a self-contained uv project with its own `pyproject.toml`. It owns all server logic including database initialization, schema, seed data, API routes, SSE streaming, market data, and LLM integration. Internal structure is up to the Backend/Market Data agents.
-- **`backend/db/`** contains schema SQL definitions and seed logic. The backend lazily initializes the database on first request — creating tables and seeding default data if the SQLite file doesn't exist or is empty.
+- **`backend/schema/`** contains schema SQL definitions and seed logic. The backend lazily initializes the database on first request — creating tables and seeding default data if the SQLite file doesn't exist or is empty.
 - **`db/`** at the top level is the runtime volume mount point. The SQLite file (`db/finally.db`) is created here by the backend and persists across container restarts via Docker volume.
 - **`planning/`** contains project-wide documentation, including this plan. All agents reference files here as the shared contract.
 - **`test/`** contains Playwright E2E tests and supporting infrastructure (e.g., `docker-compose.test.yml`). Unit tests live within `frontend/` and `backend/` respectively, following each framework's conventions.
@@ -124,9 +123,9 @@ finally/
 # Required: OpenRouter API key for LLM chat functionality
 OPENROUTER_API_KEY=your-openrouter-api-key-here
 
-# Optional: Massive (Polygon.io) API key for real market data
+# Optional: Tapetide API key for live Indian market data (NSE/BSE)
 # If not set, the built-in market simulator is used (recommended for most users)
-MASSIVE_API_KEY=
+TAPETIDE_API_KEY=
 
 # Optional: Set to "true" for deterministic mock LLM responses (testing)
 LLM_MOCK=false
@@ -134,8 +133,8 @@ LLM_MOCK=false
 
 ### Behavior
 
-- If `MASSIVE_API_KEY` is set and non-empty → backend uses Massive REST API for market data
-- If `MASSIVE_API_KEY` is absent or empty → backend uses the built-in market simulator
+- If `TAPETIDE_API_KEY` is set and non-empty → backend uses TapetidePoller (live NSE/BSE data via FastMCP)
+- If `TAPETIDE_API_KEY` is absent or empty → backend uses the built-in market simulator
 - If `LLM_MOCK=true` → backend returns deterministic mock LLM responses (for E2E tests)
 - The backend reads `.env` from the project root (mounted into the container or read via docker `--env-file`)
 
@@ -145,7 +144,7 @@ LLM_MOCK=false
 
 ### Two Implementations, One Interface
 
-Both the simulator and the Massive client implement the same abstract interface. The backend selects which to use based on the environment variable. All downstream code (SSE streaming, price cache, frontend) is agnostic to the source.
+Both the simulator and the TapetidePoller implement the same abstract interface. The backend selects which to use based on the environment variable. All downstream code (SSE streaming, price cache, frontend) is agnostic to the source.
 
 ### Simulator (Default)
 
@@ -153,16 +152,16 @@ Both the simulator and the Massive client implement the same abstract interface.
 - Updates at ~500ms intervals
 - Correlated moves across tickers (e.g., tech stocks move together)
 - Occasional random "events" — sudden 2-5% moves on a ticker for drama
-- Starts from realistic seed prices (e.g., AAPL ~$190, GOOGL ~$175, etc.)
+- Starts from realistic seed prices for Indian tickers (e.g., RELIANCE ~₹1300, TCS ~₹2200, INFY ~₹1200, etc.)
 - Runs as an in-process background task — no external dependencies
 
-### Massive API (Optional)
+### TapetidePoller (Optional — live NSE/BSE data)
 
-- REST API polling (not WebSocket) — simpler, works on all tiers
-- Polls for the union of all watched tickers on a configurable interval
-- Free tier (5 calls/min): poll every 15 seconds
-- Paid tiers: poll every 2-15 seconds depending on tier
-- Parses REST response into the same format as the simulator
+- Connects to `https://mcp.tapetide.com/mcp` using `fastmcp.Client` with Bearer token auth (`TAPETIDE_API_KEY`)
+- Calls `get_batch_quotes` with the current watchlist tickers every ~10 seconds to anchor prices to real market values
+- Between polls, applies small GBM micro-moves (~500ms interval, low volatility) to keep the UI lively — flash animations and sparklines remain fluid
+- On each Tapetide poll, prices snap to the real value; micro-moves resume from there
+- Covers ~8,200 NSE/BSE stocks
 
 ### Shared Price Cache
 
@@ -225,7 +224,7 @@ All tables include a `user_id` column defaulting to `"default"`. This is hardcod
 - `price` REAL
 - `executed_at` TEXT (ISO timestamp)
 
-**portfolio_snapshots** — Portfolio value over time (for P&L chart). Recorded every 30 seconds by a background task, and immediately after each trade execution.
+**portfolio_snapshots** — Portfolio value over time (for P&L chart). Recorded every 30 seconds by a background task, and immediately after each trade execution. Retention: last 24 hours only — the background task prunes snapshots older than 24h on each write.
 - `id` TEXT PRIMARY KEY (UUID)
 - `user_id` TEXT (default: `"default"`)
 - `total_value` REAL
@@ -241,8 +240,8 @@ All tables include a `user_id` column defaulting to `"default"`. This is hardcod
 
 ### Default Seed Data
 
-- One user profile: `id="default"`, `cash_balance=10000.0`
-- Ten watchlist entries: AAPL, GOOGL, MSFT, AMZN, TSLA, NVDA, META, JPM, V, NFLX
+- One user profile: `id="default"`, `cash_balance=100000.0` (₹1,00,000)
+- Ten watchlist entries (NSE): RELIANCE, TCS, INFY, HDFCBANK, ICICIBANK, HINDUNILVR, SBIN, WIPRO, BAJFINANCE, TATAMOTORS
 
 ---
 
@@ -359,7 +358,7 @@ The frontend is a single-page application with a dense, terminal-inspired layout
 - **Positions table** — tabular view of all positions: ticker, quantity, avg cost, current price, unrealized P&L, % change
 - **Trade bar** — simple input area: ticker field, quantity field, buy button, sell button. Market orders, instant fill.
 - **AI chat panel** — docked/collapsible sidebar. Message input, scrolling conversation history, loading indicator while waiting for LLM response. Trade executions and watchlist changes shown inline as confirmations.
-- **Header** — portfolio total value (updating live), connection status indicator, cash balance
+- **Header** — portfolio total value in ₹ (updating live), connection status indicator, cash balance in ₹
 
 ### Technical Notes
 
@@ -428,7 +427,7 @@ The container is designed to deploy to AWS App Runner, Render, or any container 
 ### Unit Tests (within `frontend/` and `backend/`)
 
 **Backend (pytest)**:
-- Market data: simulator generates valid prices, GBM math is correct, Massive API response parsing works, both implementations conform to the abstract interface
+- Market data: simulator generates valid prices, GBM math is correct, TapetidePoller response parsing works, both implementations conform to the abstract interface
 - Portfolio: trade execution logic, P&L calculations, edge cases (selling more than owned, buying with insufficient cash, selling at a loss)
 - LLM: structured output parsing handles all valid schemas, graceful handling of malformed responses, trade validation within chat flow
 - API routes: correct status codes, response shapes, error handling
@@ -454,3 +453,31 @@ The container is designed to deploy to AWS App Runner, Render, or any container 
 - Portfolio visualization: heatmap renders with correct colors, P&L chart has data points
 - AI chat (mocked): send a message, receive a response, trade execution appears inline
 - SSE resilience: disconnect and verify reconnection
+
+---
+
+## 13. Review Notes
+
+### Clarifications Needed
+
+1. ~~**Indian vs US market tickers**~~ — **Resolved:** Default watchlist switched to NSE tickers (RELIANCE, TCS, INFY, HDFCBANK, ICICIBANK, HINDUNILVR, SBIN, WIPRO, BAJFINANCE, TATAMOTORS). Simulator seed prices updated to INR values accordingly.
+
+2. ~~**MASSIVE_API_KEY → TAPETIDE_API_KEY**~~ — **Resolved:** All Massive/Polygon.io references replaced. `TAPETIDE_API_KEY` set → `TapetidePoller` (live NSE/BSE via FastMCP); unset → simulator.
+
+3. ~~**SSE cadence vs Tapetide poll rate**~~ — **Resolved:** Hybrid approach. TapetidePoller fetches real prices every ~10s to anchor to market values; between polls, low-volatility GBM micro-moves (~500ms) keep flash animations and sparklines fluid.
+
+4. ~~**Currency**~~ — **Resolved:** Hard-switched to ₹ INR throughout. Starting cash is ₹1,00,000. All price displays use the ₹ symbol.
+
+5. ~~**`portfolio_snapshots` retention**~~ — **Resolved:** Keep last 24 hours only. Background task prunes on each write. P&L chart shows intraday history.
+
+6. ~~**LLM model ID**~~ — **Resolved:** Confirmed `openrouter/openai/gpt-oss-120b` via Cerebras. Implemented via the `cerebras-inference` project skill.
+
+### Simplification Opportunities
+
+1. ~~**Remove `docker-compose.yml`**~~ — **Accepted:** `docker-compose.yml` removed from the project. Students use `start_mac.sh` / `start_windows.ps1` scripts only.
+
+2. ~~**`backend/db/` vs `db/` confusion**~~ — **Accepted:** `backend/db/` renamed to `backend/schema/` to clearly distinguish schema SQL files from the runtime SQLite volume at top-level `db/`.
+
+3. ~~**`actions` column in `chat_messages`**~~ — **Accepted:** Documented explicitly — `actions` is UI-display-only (inline confirmations in chat). The `trades` table is the source of truth for trade history. Agents must not treat `chat_messages.actions` as authoritative.
+
+4. **Frontend unit tests** — Keeping as specified. Full React Testing Library test coverage for components, animations, and display calculations is intentional.
