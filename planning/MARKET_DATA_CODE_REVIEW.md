@@ -2,302 +2,266 @@
 
 **Reviewer**: Claude Code (claude-sonnet-4-6)  
 **Date**: 2026-06-07  
-**Commit reviewed**: `6a2b36e` (Remove lazy imports for massive package — the final implementation state before the backend was reset in `0913790`)  
-**Scope**: `backend/app/market/` (8 modules, ~350 SLOC) + `backend/tests/market/` (73 tests)
+**Branch reviewed**: `claude/issue-3-20260607-0158` (commit `c6e81fa` — "feat: implement market data backend (interface, simulator, Tapetide)")  
+**Scope**: `backend/app/market_data/` (4 modules, ~250 SLOC) + `backend/tests/` (84 tests across 3 files)
+
+> **Note**: An earlier review was written against the old `6a2b36e` commit (the previous Massive/Polygon.io implementation). This document supersedes that — it reviews the correct, current implementation.
 
 ---
 
 ## Test Run Results
 
-```
-73 passed, 73 warnings in 1.23s
-```
+**84 tests collected** (not 97).
 
-**All 73 tests pass.** Lint (`ruff`) is also clean.
+| Run | Passed | Failed |
+|-----|--------|--------|
+| 1 | 83 | 1 |
+| 2 | 83 | 1 |
+| 3 | 82 | 2 |
+| 4 | 83 | 1 |
+| 5 | 83 | 1 |
 
-> **Important caveat**: `uv run pytest` fails with `ModuleNotFoundError: No module named 'massive'` because `uv run` picks up the globally-installed pytest binary (not the venv's). Tests only pass with `.venv/bin/pytest`. This is a developer-experience bug — anyone following the standard `uv run pytest` workflow will see 5 collection errors.
+- **1 deterministic failure**: `test_interface.py::TestMarketDataInterfaceMethods::test_start_with_multiple_tickers` — fails every run.
+- **1 flaky failure**: `test_simulator.py::TestSectorCorrelation::test_it_stocks_move_together` — fails ~20% of runs (probabilistic test with insufficient samples).
 
 ### Coverage Summary
 
 | Module | Coverage | Uncovered lines |
 |---|---|---|
-| `models.py` | **100%** | — |
-| `cache.py` | **100%** | — |
 | `interface.py` | **100%** | — |
-| `seed_prices.py` | **100%** | — |
-| `factory.py` | **100%** | — |
-| `massive_client.py` | **94%** | 85-87 (`_poll_loop` body), 125 (`_fetch_snapshots` sync call) |
-| `simulator.py` | **98%** | 149 (duplicate ticker guard), 268-269 (exception log) |
-| `stream.py` | **33%** | 26-48 (route handler), 62-87 (event generator) |
+| `simulator.py` | **97%** | 132 (event log), 178 (edge guard) |
+| `tapetide.py` | **88%** | 29 (import branch), 109-112 (poll loop body), 116-117 (micro loop body), 125 (fastmcp call), 130-141 (response parsing branches), 243 (zero-price guard) |
+| `__init__.py` | **60%** | 25-28 (factory branches — no test exercises the factory) |
 | **Total** | **91%** | |
 
-The low `stream.py` coverage is expected (requires a running ASGI server), but the module has **zero functional tests** — neither the SSE response headers nor the generator behaviour are tested at all.
-
 ---
 
-## Findings
+## Failing Tests
 
-Findings are ranked: **Critical** (blocks the next phase) → **Bug** (wrong at runtime) → **Design** (technical debt) → **Test gap**.
+### F1 — `test_start_with_multiple_tickers` (always fails)
 
----
-
-### CRITICAL — Specification Mismatches (Must Fix Before Next Phase)
-
-#### C1 — Wrong environment variable in factory (`factory.py:13`)
+**Root cause**: `_Minimal.start()` in `test_interface.py` only sets `self._running = True` — it does not call `add_ticker()` for each ticker. The test then asserts those tickers appear in the price cache, which they don't.
 
 ```python
-api_key = os.environ.get("MASSIVE_API_KEY", "").strip()
+# _Minimal.start() — incomplete:
+async def start(self, tickers):
+    self._running = True          # ← doesn't add tickers to the cache
+
+# Test assertion fails:
+assert set(all_prices.keys()) == {"RELIANCE", "TCS", "INFY"}
+# actual: set()
 ```
 
-The project spec and `.env.example` define `TAPETIDE_API_KEY` as the environment variable for live market data. `MASSIVE_API_KEY` is the old Polygon.io variable. With the current code, setting `TAPETIDE_API_KEY` has **no effect** — the factory always falls through to the simulator, silently ignoring the configured API key.
-
-**Fix**: Change to `os.environ.get("TAPETIDE_API_KEY", "")`.
-
----
-
-#### C2 — Wrong live data implementation (`massive_client.py`, `factory.py`)
-
-`MassiveDataSource` uses the Polygon.io REST API (`RESTClient.get_snapshot_all`) which:
-- Only covers **US stocks** (not NSE/BSE)
-- Uses a synchronous REST client that blocks the event loop (mitigated by `asyncio.to_thread`, but still)
-- Is not compatible with the Tapetide MCP endpoint
-
-The spec requires a `TapetidePoller` class that:
-- Connects to `https://mcp.tapetide.com/mcp` using `fastmcp.Client` with Bearer token auth
-- Calls the `get_batch_quotes` MCP tool every ~10 seconds
-- Applies low-volatility GBM micro-moves between polls (the hybrid approach)
-
-`MassiveDataSource` cannot be adapted for this — it needs to be **replaced** with a new `TapetidePoller` class. The abstract `MarketDataSource` interface and `PriceCache` remain valid.
+**Fix** — update `_Minimal.start()` to loop through tickers:
+```python
+async def start(self, tickers):
+    self._running = True
+    for ticker in tickers:
+        await self.add_ticker(ticker)
+```
 
 ---
 
-#### C3 — US tickers and USD prices in simulator seed data (`seed_prices.py`)
+### F2 — `test_it_stocks_move_together` (flaky, ~20% failure rate)
+
+**Root cause**: The test measures correlation over only 200 price steps and asserts that TCS/INFY correlation exceeds TCS/SBIN correlation. With 50% idiosyncratic noise per step, 200 samples are insufficient — sample correlation can easily fall below the cross-sector value by chance. This is a statistical power issue.
 
 ```python
-SEED_PRICES = {
-    "AAPL": 190.00, "GOOGL": 175.00, "MSFT": 420.00, ...
-}
-CORRELATION_GROUPS = {
-    "tech": {"AAPL", "GOOGL", "MSFT", "AMZN", "META", "NVDA", "NFLX"},
-    "finance": {"JPM", "V"},
-}
+for _ in range(200):    # ← too few samples for reliable correlation estimate
+    s._step()
 ```
 
-The spec's default watchlist is **NSE tickers** (RELIANCE, TCS, INFY, HDFCBANK, ICICIBANK, HINDUNILVR, SBIN, WIPRO, BAJFINANCE, TATAMOTORS) at **INR prices** (e.g., RELIANCE ~₹1300, TCS ~₹2200). The SQLite seed data inserts these NSE tickers, but the simulator has no seed prices for them — they fall through to `random.uniform(50.0, 300.0)`, producing nonsensical ₹50–300 prices and no meaningful correlation structure.
-
-**Fix**: Replace `SEED_PRICES`, `TICKER_PARAMS`, and `CORRELATION_GROUPS` with Indian market data. Suggested seed values:
-
-| Ticker | Approx. INR price | Sector |
-|---|---|---|
-| RELIANCE | 1,300 | energy/conglomerate |
-| TCS | 2,200 | IT services |
-| INFY | 1,200 | IT services |
-| HDFCBANK | 1,650 | private banks |
-| ICICIBANK | 1,200 | private banks |
-| HINDUNILVR | 2,400 | FMCG |
-| SBIN | 800 | PSU banks |
-| WIPRO | 280 | IT services |
-| BAJFINANCE | 7,000 | NBFCs |
-| TATAMOTORS | 950 | auto |
-
-Suggested correlation groups: `"it"` (TCS, INFY, WIPRO), `"pvt_banks"` (HDFCBANK, ICICIBANK), `"conglomerate"` (RELIANCE, TATAMOTORS), `"fmcg"` (HINDUNILVR), `"finance"` (BAJFINANCE, SBIN).
+**Fix**: Increase to 1000+ steps, or use `pytest.mark.flaky` with a retry budget, or restructure as a deterministic test using a fixed random seed:
+```python
+import numpy as np
+np.random.seed(42)
+random.seed(42)
+for _ in range(1000):
+    s._step()
+```
 
 ---
 
-### BUG — Correctness Issues
+## Correctness Bugs
 
-#### B1 — `timestamp=0.0` overwritten by `time.time()` (`cache.py:18`)
+### B1 — Falsy-zero price silently ignored in `_update_from_quote` (`tapetide.py:~170`)
 
 ```python
-ts = timestamp or time.time()
+price = (
+    quote.get("price")
+    or quote.get("last_price")
+    or quote.get("ltp")
+)
 ```
 
-`timestamp` is typed `float | None`. A legitimate `timestamp=0.0` (Unix epoch, used in some tests and edge cases) evaluates as falsy and gets silently replaced with the current time. This can cause `test_timestamp_conversion` to pass with the wrong value in certain timing scenarios.
+A legitimate price of `0.0` is falsy and causes the expression to fall through to `None`. The same pattern appears in `_update_from_quote_dict`. For Indian stocks this is cosmetically benign (no NSE stock trades at ₹0), but it's a semantic bug that silently drops updates on circuit-breaker halts or malformed data.
 
-**Fix**: `ts = timestamp if timestamp is not None else time.time()`
+**Fix**: `price = quote.get("price") if "price" in quote else quote.get("last_price") if "last_price" in quote else quote.get("ltp")`
+
+Or more clearly:
+```python
+for key in ("price", "last_price", "ltp"):
+    price = quote.get(key)
+    if price is not None:
+        break
+```
 
 ---
 
-#### B2 — Cholesky can raise unhandled `LinAlgError` (`simulator.py:160`)
+### B2 — Ticker stuck at ₹0 if initial Tapetide poll fails (`tapetide.py:add_ticker`, `_apply_micro_moves`)
+
+`add_ticker()` seeds the cache with `price=0.0`. `_apply_micro_moves()` skips tickers with `price <= 0`:
 
 ```python
-self._cholesky = np.linalg.cholesky(corr)
+if current.price <= 0:
+    continue  # not yet seeded from a real poll
 ```
 
-`np.linalg.cholesky` raises `numpy.linalg.LinAlgError` if the matrix is not strictly positive definite. This call is inside `_rebuild_cholesky`, which is called from `add_ticker` and `remove_ticker`. If a numerical edge case (e.g., all tickers in the same group, near-unit correlation) produces a singular matrix, the exception propagates out of the async `add_ticker` call, crashing that coroutine — the ticker is never added to the simulation, but the cache has no price for it. The simulator continues running but the new ticker silently has no data.
+If `_poll_tapetide()` fails at startup (network error, bad API key, `fastmcp` bug), the ticker stays at ₹0.0 permanently. Micro-moves keep skipping it. The SSE stream broadcasts `price=0` to the frontend indefinitely — no recovery until the next successful poll.
 
-**Fix**: Wrap in a try/except and apply a small regularisation if Cholesky fails:
+**Fix**: Seed with the simulator's `SEED_PRICES` as a fallback, or use `DEFAULT_SEED_PRICE` as the initial price instead of `0.0`:
 ```python
-try:
-    self._cholesky = np.linalg.cholesky(corr)
-except np.linalg.LinAlgError:
-    corr += np.eye(n) * 1e-6  # small regularisation
-    self._cholesky = np.linalg.cholesky(corr)
+from app.market_data.simulator import SEED_PRICES, DEFAULT_SEED_PRICE
+seed = SEED_PRICES.get(ticker, DEFAULT_SEED_PRICE)
+self._price_cache[ticker] = PriceData(ticker=ticker, price=seed, ...)
 ```
 
 ---
 
-#### B3 — Version/snapshot race in SSE generator (`stream.py:66-72` + `cache.py:47`)
-
-```python
-# In _generate_events:
-current_version = price_cache.version  # read 1 (no lock)
-if current_version != last_version:
-    prices = price_cache.get_all()     # read 2 (separate lock acquisition)
-```
-
-Between reading `version` and calling `get_all()`, the background task can write another update, incrementing `_version` again. The SSE event is sent with the price snapshot from read 2 but tagged against the version from read 1. On the next cycle, `current_version` equals the already-captured value, so the client misses the intermediate update. In practice this is cosmetically benign (the next tick catches up), but it means the version-based change detection has a one-tick blind spot under load.
-
-**Fix**: Read version and snapshot atomically by adding a combined method to `PriceCache`:
-```python
-def get_snapshot(self) -> tuple[int, dict[str, PriceUpdate]]:
-    with self._lock:
-        return self._version, dict(self._prices)
-```
-
----
-
-#### B4 — `SimulatorDataSource.add_ticker` not normalizing ticker format (`simulator.py:199-205`)
-
-`MassiveDataSource.add_ticker` normalizes to uppercase and strips whitespace; `SimulatorDataSource.add_ticker` does not. A ticker added as `"tcs"` or `"  TCS  "` via the watchlist API would be tracked by the simulator under the wrong key, get no SSE updates, and the API response for `GET /api/watchlist` would show a mismatched symbol.
-
-**Fix**: Add `ticker = ticker.upper().strip()` at the start of `SimulatorDataSource.add_ticker` and `remove_ticker`.
-
----
-
-### DESIGN — Technical Debt
-
-#### D1 — Module-level `router` mutated inside factory (`stream.py:12-24`)
+### B3 — `_process_quotes` falls through to wrong branch when all TextContent items have unparseable JSON (`tapetide.py:~196`)
 
 ```python
-router = APIRouter(prefix="/api/stream", tags=["streaming"])  # module-level singleton
-
-def create_stream_router(price_cache: PriceCache) -> APIRouter:
-    @router.get("/prices")   # mutates the module-level object
-    async def stream_prices(...):
-        ...
-    return router            # returns the same singleton
+if isinstance(result, list):
+    for item in result:
+        text = getattr(item, "text", None)
+        if text:
+            try:
+                raw = json.loads(text)
+                break
+            except (json.JSONDecodeError, TypeError):
+                continue
+    else:
+        # result was a plain Python list (e.g. from tests)
+        if result and not hasattr(result[0], "text"):
+            raw = result
 ```
 
-Every call to `create_stream_router()` registers an **additional** route on the same `APIRouter` object. The function is called once in production, but in the test suite each test that creates an app instance calls it again, silently registering duplicate routes. FastAPI silently keeps the first registered handler, so the `price_cache` passed to subsequent calls is ignored. This is currently masked by the lack of stream tests.
+If every item in `result` has a `.text` attribute but each fails `json.loads` (e.g., all malformed), the `for/else` branch runs. But `result[0]` does have `.text` (it's a FastMCP `TextContent` object), so `not hasattr(result[0], "text")` is `False`, and `raw` remains the original `result` (a list of `TextContent` objects). The code then tries `for item in raw: self._update_from_quote(item, now)` — but each `item` is a `TextContent` object, not a dict, so every `.get()` call fails silently (returns `None`). No prices are updated, no exception is raised, the failure is completely silent.
 
-**Fix**: Move `router = APIRouter(...)` inside `create_stream_router` so a fresh router is created per call.
+**Fix**: Set `raw = []` as the fallback when no valid JSON is found, so the subsequent loop does nothing and the failure is explicit (via the existing `logger.error` in `_poll_tapetide`'s except clause).
 
 ---
 
-#### D2 — Per-tick constant recomputation in GBM hot path (`simulator.py:112-115`)
+### B4 — `PriceData` is mutable; cache can be corrupted by callers (`interface.py:12`)
 
 ```python
-drift = (mu - 0.5 * sigma**2) * self._dt      # constant per ticker — recomputed every tick
-diffusion = sigma * math.sqrt(self._dt) * z    # sigma*sqrt(dt) is constant — recomputed every tick
+@dataclass
+class PriceData:
+    ticker: str
+    price: float
+    ...
 ```
 
-`drift` and `sigma * sqrt(dt)` are pure functions of per-ticker constants (`mu`, `sigma`) and the global `dt`. They never change between steps. At 500ms intervals with 10 tickers, these are recomputed 20 times/second for no reason.
-
-**Fix**: Precompute in `_add_ticker_internal`:
+`get_all_prices()` returns a copy of the outer dict, but the `PriceData` values are the same objects. Any caller can do:
 ```python
-params["drift"] = (mu - 0.5 * sigma**2) * self._dt
-params["sigma_sqrt_dt"] = sigma * math.sqrt(self._dt)
+data = provider.get_all_prices()
+data["RELIANCE"].price = 0.0  # corrupts the live cache
 ```
-Then in `step()`: `diffusion = params["sigma_sqrt_dt"] * z_correlated[i]`.
+
+**Fix**: Add `frozen=True`:
+```python
+@dataclass(frozen=True)
+class PriceData:
+```
 
 ---
 
-#### D3 — GBM time step uses US market hours (`seed_prices.py:36`)
+## Design Issues
+
+### D1 — Factory function (`__init__.py`) has 0% test coverage
+
+`create_market_data_provider()` is the primary entry point but neither path (simulator nor TapetidePoller) is exercised by any test. The factory function also has no test for the whitespace-only API key case.
+
+**Fix**: Add a `TestFactory` class:
+```python
+def test_no_key_returns_simulator(monkeypatch):
+    monkeypatch.delenv("TAPETIDE_API_KEY", raising=False)
+    assert isinstance(create_market_data_provider(), MarketSimulator)
+
+def test_key_returns_tapetide(monkeypatch):
+    monkeypatch.setenv("TAPETIDE_API_KEY", "test-key")
+    assert isinstance(create_market_data_provider(), TapetidePoller)
+
+def test_whitespace_key_returns_simulator(monkeypatch):
+    monkeypatch.setenv("TAPETIDE_API_KEY", "   ")
+    assert isinstance(create_market_data_provider(), MarketSimulator)
+```
+
+---
+
+### D2 — Subclasses must directly mutate `_price_cache`; no thread-safety (`interface.py`)
+
+The base class exposes `self._price_cache` as a plain `dict` that subclasses write to directly. There is no lock. In the TapetidePoller, `_poll_task` (running `_poll_tapetide`) and `_micro_task` (running `_apply_micro_moves`) both write to `_price_cache` concurrently as asyncio tasks. Because asyncio is single-threaded and neither write contains an `await`, individual dict assignments are safe — but it's a fragile design that will break if any future writer uses threads (`asyncio.to_thread`, `ThreadPoolExecutor`).
+
+The old implementation's dedicated `PriceCache` with an explicit `threading.Lock` was safer. Consider adding a comment to `interface.py` documenting the concurrency contract.
+
+---
+
+### D3 — `MarketSimulator._step` uses a shared `group_shocks` dict but tickers iterate over `self._tickers` which could change (`simulator.py:114`)
 
 ```python
-TRADING_SECONDS_PER_YEAR = 252 * 6.5 * 3600  # NYSE: 9:30–16:00
+def _step(self) -> None:
+    group_shocks = {i: random.gauss(0, 1) for i in range(len(CORRELATION_GROUPS))}
+    for ticker in list(self._tickers):  # list() snapshots tickers
 ```
 
-NSE/BSE trades 6.25 hours/day (9:15–15:30 IST), not 6.5. The error is ~4% and slightly over-states drift and volatility per tick. Minor, but inconsistent with the project's Indian market focus.
-
-**Fix**: `TRADING_SECONDS_PER_YEAR = 252 * 6.25 * 3600`.
+The `list(self._tickers)` defensively snapshots the set, which is correct. The `group_shocks` dict is pre-computed once per step — also correct. No issue here, just noting the correct defensive pattern.
 
 ---
 
-### TEST GAPS
+### D4 — `test_gbm_log_returns_are_normal` in `test_simulator.py` is slow (generates 10,000 steps)
 
-#### T1 — `stream.py` has zero functional tests
-
-The SSE endpoint (the primary user-facing feature) has 33% coverage and no tests for:
-- Response `Content-Type: text/event-stream`
-- `retry: 1000\n\n` as the first event
-- Correct JSON payload shape per `PriceUpdate.to_dict()`
-- Version-based deduplication (no event if cache unchanged)
-- Client disconnect cleanup
-
-Use FastAPI's `TestClient` with `httpx` in streaming mode to test the generator without a running server.
-
----
-
-#### T2 — No test for `timestamp=0.0` in `PriceCache.update`
-
-Bug B1 (`timestamp or time.time()`) is not caught by any test. A specific test for zero-epoch timestamp would have caught it.
-
----
-
-#### T3 — `uv run pytest` fails; tests only pass via `.venv/bin/pytest`
-
-The `uv run` command uses the globally-installed pytest binary, not the venv's, so `massive` is not found. Add `pytest` and `pytest-asyncio` to `[project.optional-dependencies].dev` **and** add this to `pyproject.toml`:
-
-```toml
-[tool.uv.scripts]
-test = "pytest tests/"
-```
-
-Then `uv run test` works correctly. Alternatively, document `.venv/bin/pytest` explicitly in `backend/README.md`.
-
----
-
-#### T4 — Deprecated `event_loop_policy` fixture in `tests/conftest.py`
-
-```
-PytestDeprecationWarning: Overriding the "event_loop_policy" fixture is deprecated
-```
-
-The `event_loop_policy` fixture in `tests/conftest.py` is deprecated in `pytest-asyncio`. Remove it — the default policy is already `asyncio.DefaultEventLoopPolicy()`.
-
----
-
-## Summary Table
-
-| # | Severity | File | Issue |
-|---|---|---|---|
-| C1 | Critical | `factory.py:13` | Reads `MASSIVE_API_KEY` instead of `TAPETIDE_API_KEY` |
-| C2 | Critical | `massive_client.py` | `MassiveDataSource` must be replaced with `TapetidePoller` |
-| C3 | Critical | `seed_prices.py` | US tickers/USD prices; must be replaced with NSE/INR data |
-| B1 | Bug | `cache.py:18` | `timestamp or time.time()` overwrites zero timestamps |
-| B2 | Bug | `simulator.py:160` | Unhandled `LinAlgError` from Cholesky on singular matrix |
-| B3 | Bug | `stream.py:66` | Version/snapshot read is not atomic; one-tick blind spot |
-| B4 | Bug | `simulator.py:199` | Ticker not normalised (uppercase/strip) in `SimulatorDataSource` |
-| D1 | Design | `stream.py:12` | Module-level router mutated by factory; duplicate routes on re-call |
-| D2 | Design | `simulator.py:112` | Drift and sigma constants recomputed every 500ms tick |
-| D3 | Design | `seed_prices.py:36` | Trading hours constant uses NYSE hours, not NSE |
-| T1 | Test gap | `stream.py` | No functional tests for SSE endpoint (33% coverage) |
-| T2 | Test gap | `test_cache.py` | No test for `timestamp=0.0` (would catch B1) |
-| T3 | Test gap | `pyproject.toml` | `uv run pytest` fails; requires `.venv/bin/pytest` |
-| T4 | Test gap | `tests/conftest.py` | Deprecated `event_loop_policy` fixture generates 73 warnings |
+The test runs 10,000 `_step()` calls inline. Each step iterates over 5 tickers, computing log returns. It takes ~2s per run. This isn't a bug, but it slows down the test suite for other developers. Consider reducing to 2,000 steps (still enough for a Shapiro-Wilk test) or marking it `@pytest.mark.slow`.
 
 ---
 
 ## What's Working Well
 
-- **Abstract interface design** is clean and correctly separates concerns. The `MarketDataSource` ABC + `PriceCache` hub pattern will carry forward to `TapetidePoller` unchanged.
-- **GBM simulator implementation** is mathematically correct (proper Itô calculus, Cholesky for correlations, random shock events). It's production-quality for a simulated market.
-- **`PriceCache` threading** is correctly designed — all mutations are lock-protected, immutable `PriceUpdate` objects prevent stale reads.
-- **Error handling in `MassiveDataSource._poll_once`** is defensive and correct: bad snapshots are skipped individually; API failures don't crash the poller.
-- **Test coverage** is excellent for an early implementation: 91% overall, 100% on the four core modules.
-- **Code style** is consistent and idiomatic Python 3.12. Ruff passes with zero warnings.
+The new implementation is a major improvement over the old one on every dimension that matters:
+
+- **Correct environment variable** — `TAPETIDE_API_KEY`, not `MASSIVE_API_KEY`.
+- **`TapetidePoller` implemented** — FastMCP client with lazy `fastmcp` import for graceful degradation; the `try/except ImportError` pattern means tests run without installing fastmcp.
+- **NSE tickers and INR seed prices** — RELIANCE, TCS, INFY, HDFCBANK, ICICIBANK, HINDUNILVR, SBIN, WIPRO, BAJFINANCE, TATAMOTORS at correct INR values.
+- **Hybrid polling model** — real Tapetide poll every 10s + low-volatility GBM micro-moves every 500ms. Exactly matches the spec.
+- **Indian sector correlation groups** — IT (TCS, INFY, WIPRO), Banking (HDFCBANK, ICICIBANK, SBIN, BAJFINANCE), vs the old US tech/finance groups.
+- **Simpler architecture** — `_price_cache` dict on the base class, no separate `PriceCache` wrapper. Cleaner for a single-writer model.
+- **Excellent `_process_quotes` flexibility** — handles list-of-dicts, dict-of-dicts, flat price values, and FastMCP TextContent items. Well-tested with dedicated test class.
+- **`PriceData` is a dataclass** — clean, equality-supporting, sensible field names.
+- **`fastmcp` is optional at import time** — `TapetidePoller` can be imported and tested without `fastmcp` installed.
 
 ---
 
-## Priority Order for Next Agent
+## Summary Table
 
-1. **Implement `TapetidePoller`** (C2) — the `MarketDataSource` interface and `PriceCache` are ready; just need the new class in `backend/app/market/tapetide_client.py`.
-2. **Update `seed_prices.py`** (C3) — replace US data with NSE tickers and INR seed prices.
-3. **Update `factory.py`** (C1) — read `TAPETIDE_API_KEY`, instantiate `TapetidePoller`.
-4. **Fix `cache.py:18`** (B1) — `timestamp is not None` check.
-5. **Fix `stream.py` router** (D1) — move `APIRouter(...)` inside the factory function.
-6. **Fix ticker normalization** (B4) — add `upper().strip()` in `SimulatorDataSource`.
-7. **Add SSE tests** (T1) — at minimum test response headers and payload shape.
-8. **Precompute GBM constants** (D2) — low effort, eliminates unnecessary work in the hot path.
+| # | Severity | Location | Issue |
+|---|---|---|---|
+| F1 | **Test failure** | `test_interface.py:160` | `_Minimal.start()` doesn't call `add_ticker()`, so `test_start_with_multiple_tickers` always fails |
+| F2 | **Flaky test** | `test_simulator.py:213` | Correlation test uses 200 samples — insufficient statistical power (~20% false failure rate) |
+| B1 | Bug | `tapetide.py:~170` | `quote.get("price") or ...` treats `0.0` as falsy, silently drops zero-price updates |
+| B2 | Bug | `tapetide.py:add_ticker` | Seeds price at `0.0`; micro-moves skip forever if initial Tapetide poll fails |
+| B3 | Bug | `tapetide.py:_process_quotes` | When all TextContent items have invalid JSON, falls through to iterate TextContent objects as dicts — silent no-op |
+| B4 | Bug | `interface.py:12` | `PriceData` is mutable; callers can corrupt the live cache via `get_all_prices()` |
+| D1 | Design/test gap | `__init__.py:create_market_data_provider` | Factory function completely untested (60% coverage) |
+| D2 | Design | `interface.py` | `_price_cache` is an unguarded mutable dict; no concurrency contract documented |
+
+---
+
+## Priority Fix Order
+
+1. **Fix F1** (2 lines): add the ticker loop inside `_Minimal.start()` — unblocks CI.
+2. **Fix B4** (1 character): `@dataclass(frozen=True)` — prevents cache corruption.
+3. **Fix B1** (5 lines): replace `or`-chain with `next((v for k, v in ... if v is not None), None)` pattern.
+4. **Fix B2** (3 lines): seed `TapetidePoller.add_ticker` with `SEED_PRICES.get(ticker, DEFAULT_SEED_PRICE)` instead of `0.0`.
+5. **Fix F2** (1 number): increase step count from 200 → 1000, or add `random.seed(42)`.
+6. **Add factory tests** (D1): 3 tests, ~20 lines.
+7. **Fix B3** (2 lines): `raw = []` as fallback in the `for/else` branch.
