@@ -56,13 +56,14 @@ class TestInterfaceCompliance:
 # ---------------------------------------------------------------------------
 
 class TestTickerManagement:
-    async def test_add_ticker_creates_zero_price_entry(self):
+    async def test_add_ticker_creates_seeded_price_entry(self):
+        from app.market_data.simulator import DEFAULT_SEED_PRICE, SEED_PRICES
         p = make_poller()
         await p.add_ticker("RELIANCE")
         pd = p.get_price("RELIANCE")
         assert pd is not None
         assert pd.ticker == "RELIANCE"
-        assert pd.price == 0.0
+        assert pd.price == SEED_PRICES.get("RELIANCE", DEFAULT_SEED_PRICE)
 
     async def test_add_ticker_is_idempotent(self):
         p = make_poller()
@@ -171,8 +172,9 @@ class TestProcessQuotesList:
     async def test_list_unknown_ticker_ignored(self):
         p = make_poller()
         await p.add_ticker("RELIANCE")
+        seed_price = p.get_price("RELIANCE").price
         p._process_quotes([{"ticker": "UNKNOWN", "price": 999.0}])
-        assert p.get_price("RELIANCE").price == 0.0
+        assert p.get_price("RELIANCE").price == seed_price
 
     async def test_empty_list_no_error(self):
         p = make_poller()
@@ -239,9 +241,10 @@ class TestProcessQuotesTextContent:
     async def test_invalid_json_in_text_content_no_error(self):
         p = make_poller()
         await p.add_ticker("INFY")
+        price_before = p.get_price("INFY").price
         p._process_quotes([_text_content("not json at all")])
-        # price must remain 0.0 (unchanged)
-        assert p.get_price("INFY").price == 0.0
+        # price must remain unchanged (invalid JSON → no update)
+        assert p.get_price("INFY").price == price_before
 
     async def test_multiple_text_content_uses_first_valid(self):
         import json
@@ -278,7 +281,12 @@ class TestApplyMicroMoves:
 
     async def test_micro_moves_skip_zero_price(self):
         p = make_poller()
-        await p.add_ticker("TCS")  # price is 0.0 after add
+        await p.add_ticker("TCS")
+        # Manually zero out the price to exercise the skip-zero guard
+        p._price_cache["TCS"] = PriceData(
+            ticker="TCS", price=0.0, previous_price=0.0,
+            timestamp="ts", change_direction="unchanged",
+        )
         p._apply_micro_moves()
         assert p.get_price("TCS").price == 0.0
 

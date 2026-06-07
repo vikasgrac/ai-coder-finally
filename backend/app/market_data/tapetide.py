@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set
 
 from app.market_data.interface import MarketDataInterface, PriceData
+from app.market_data.simulator import DEFAULT_SEED_PRICE, SEED_PRICES
 
 logger = logging.getLogger(__name__)
 
@@ -88,11 +89,13 @@ class TapetidePoller(MarketDataInterface):
             return
         self._tickers.add(ticker)
         now = datetime.now(timezone.utc).isoformat()
-        # Price is 0 until the first real poll arrives
+        # Seed from known INR prices so micro-moves can start immediately;
+        # the first real Tapetide poll will snap to the live market value.
+        seed = SEED_PRICES.get(ticker, DEFAULT_SEED_PRICE)
         self._price_cache[ticker] = PriceData(
             ticker=ticker,
-            price=0.0,
-            previous_price=0.0,
+            price=seed,
+            previous_price=seed,
             timestamp=now,
             change_direction="unchanged",
         )
@@ -161,17 +164,26 @@ class TapetidePoller(MarketDataInterface):
         # --- unwrap FastMCP content items ---
         raw: Any = result
         if isinstance(result, list):
+            had_text_content = False
             for item in result:
                 text = getattr(item, "text", None)
                 if text:
+                    had_text_content = True
                     try:
                         raw = json.loads(text)
                         break
                     except (json.JSONDecodeError, TypeError):
                         continue
             else:
-                # result was a plain Python list (e.g. from tests)
-                if result and not hasattr(result[0], "text"):
+                # for-else: loop completed without break (no valid JSON found)
+                if had_text_content:
+                    logger.error(
+                        "TapetidePoller: all TextContent items contained invalid JSON;"
+                        " price cache not updated"
+                    )
+                    return
+                elif result and not hasattr(result[0], "text"):
+                    # plain Python list (e.g. from tests)
                     raw = result
 
         # --- dispatch on shape ---
@@ -190,10 +202,10 @@ class TapetidePoller(MarketDataInterface):
     def _update_from_quote(self, quote: Dict[str, Any], now: str) -> None:
         """Handle a single quote dict that includes the ticker key."""
         ticker = quote.get("ticker") or quote.get("symbol")
-        price  = (
-            quote.get("price")
-            or quote.get("last_price")
-            or quote.get("ltp")
+        # Use `k in quote` rather than truthiness so price=0.0 is not skipped
+        price = next(
+            (quote[k] for k in ("price", "last_price", "ltp") if k in quote),
+            None,
         )
         if ticker and price is not None:
             self._set_price(str(ticker), float(price), now)
@@ -202,10 +214,10 @@ class TapetidePoller(MarketDataInterface):
         self, ticker: str, data: Dict[str, Any], now: str
     ) -> None:
         """Handle a quote nested under the ticker key."""
-        price = (
-            data.get("price")
-            or data.get("last_price")
-            or data.get("ltp")
+        # Use `k in data` rather than truthiness so price=0.0 is not skipped
+        price = next(
+            (data[k] for k in ("price", "last_price", "ltp") if k in data),
+            None,
         )
         if price is not None:
             self._set_price(ticker, float(price), now)

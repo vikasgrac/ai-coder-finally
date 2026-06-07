@@ -98,6 +98,8 @@ class TestMarketDataInterfaceAbstract:
 class _Minimal(MarketDataInterface):
     async def start(self, tickers):
         self._running = True
+        for ticker in tickers:
+            await self.add_ticker(ticker)
 
     async def stop(self):
         self._running = False

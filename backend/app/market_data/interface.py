@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 
-@dataclass
+@dataclass(frozen=True)
 class PriceData:
     """A single price snapshot for one ticker."""
     ticker: str

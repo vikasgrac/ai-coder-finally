@@ -218,7 +218,8 @@ class TestSectorCorrelation:
         await s.start(it_tickers + other_tickers)
 
         price_series = {t: [] for t in it_tickers + other_tickers}
-        for _ in range(200):
+        random.seed(42)  # deterministic seed prevents flakiness
+        for _ in range(1000):
             s._step()
             for t in price_series:
                 price_series[t].append(s.get_price(t).price)
