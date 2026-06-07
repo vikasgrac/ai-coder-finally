@@ -67,7 +67,7 @@ The user runs a single Docker command (or a provided start script). A browser op
 - **Database**: SQLite, single file at `db/finally.db`, volume-mounted for persistence
 - **Real-time data**: Server-Sent Events (SSE) — simpler than WebSockets, one-way server→client push, works everywhere
 - **AI integration**: LiteLLM → OpenRouter (Cerebras for fast inference), with structured outputs for trade execution
-- **Market data**: Environment-variable driven — simulator by default, real data via Massive API if key provided
+- **Market data**: Environment-variable driven — simulator by default, real data via tapetide API if key provided
 
 ### Why These Choices
 
@@ -165,7 +165,7 @@ Both the simulator and the TapetidePoller implement the same abstract interface.
 
 ### Shared Price Cache
 
-- A single background task (simulator or Massive poller) writes to an in-memory price cache
+- A single background task (simulator or TapetidePoller) writes to an in-memory price cache
 - The cache holds the latest price, previous price, and timestamp for each ticker
 - SSE streams read from this cache and push updates to connected clients
 - This architecture supports future multi-user scenarios without changes to the data layer
@@ -305,10 +305,10 @@ The LLM is instructed to respond with JSON matching this schema:
 {
   "message": "Your conversational response to the user",
   "trades": [
-    {"ticker": "AAPL", "side": "buy", "quantity": 10}
+    {"ticker": "RELIANCE", "side": "buy", "quantity": 10}
   ],
   "watchlist_changes": [
-    {"ticker": "PYPL", "action": "add"}
+    {"ticker": "WIPRO", "action": "add"}
   ]
 }
 ```
