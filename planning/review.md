@@ -1,37 +1,39 @@
-# Change Review
+# Review
+
+Scope: changes in the working tree since `0913790`.
 
 ## Findings
 
-### [HIGH] The backend implementation was deleted while the docs still require and reference it.
+### [HIGH] Quick Start points to files that do not exist
 
-The working tree deletes the entire `backend/` uv project, including `backend/pyproject.toml`, market-data interfaces, simulator, stream code, and all backend tests. Current project docs still describe a FastAPI backend as an active implementation boundary in `planning/PLAN.md` lines 90-112, and `CLAUDE.md` lines 20-26 instruct future work to build `TapetidePoller` against the same `MarketDataInterface` and shared cache as the "existing simulator." With those files removed, there is no existing interface, simulator, SSE stream, or backend test suite to extend, so the next implementation agent will either fail or recreate incompatible code.
+`README.md:16` tells users to copy `.env.example`, and `README.md:18`-`README.md:19` / `README.md:49`-`README.md:50` tell them to run start/stop scripts under `scripts/`. None of `.env.example`, `scripts/start_mac.sh`, `scripts/start_windows.ps1`, `scripts/stop_mac.sh`, or `scripts/stop_windows.ps1` exist in this working tree. The updated README has become the repo entrypoint, so the first setup path now fails immediately.
 
-Recommendation: restore the backend package and tests, or update the plan/agent docs to clearly state this repo has been reset to documentation-only and that backend implementation must be rebuilt from scratch.
+Recommendation: either add the documented env example and scripts in the same change, or rewrite the README as a specification/status document until those files exist.
 
-### [HIGH] `CLAUDE.md` points agents at deleted planning files.
+### [HIGH] New market-data docs reintroduce the obsolete Massive/US-market contract
 
-`CLAUDE.md` line 5 says the completed market-data component is summarized in `planning/MARKET_DATA_SUMMARY.md` with details in `planning/archive`, but this diff deletes `planning/MARKET_DATA_SUMMARY.md` and the archived market-data documents. That makes the primary agent instruction point to missing reference material exactly when agents are told to consult it.
+`planning/market_interface.md:3`, `planning/market_interface.md:117`-`planning/market_interface.md:128`, `planning/market_interface.md:159`-`planning/market_interface.md:180`, and `planning/market_interface.md:331`-`planning/market_interface.md:344` specify `MassivePoller`, `MASSIVE_API_KEY`, Polygon endpoints, and US equity behavior. The new `planning/Massive_API.md:1`-`planning/Massive_API.md:20` doubles down on the same API/key contract. This directly contradicts the active plan, which says `TAPETIDE_API_KEY` selects Tapetide for NSE/BSE data (`planning/PLAN.md:126`-`planning/PLAN.md:137`) and claims all Massive/Polygon references were replaced (`planning/PLAN.md:463`-`planning/PLAN.md:465`). An implementation agent following these new docs will build the wrong provider and environment-variable switch.
 
-Recommendation: either restore those docs or remove/update the reference in `CLAUDE.md`.
+Recommendation: remove the Massive API reference docs or archive them clearly as obsolete, and update `market_interface.md` to define `TapetidePoller`, `TAPETIDE_API_KEY`, FastMCP usage, and NSE/BSE response shapes.
 
-### [HIGH] The README was reduced to an unusable broken title.
+### [HIGH] Stop hook can run an expensive mutating review after every Claude response
 
-`README.md` now contains only two lines: `# FinAlly -` and `AI Trading Workstation`. The previous quick start, architecture, environment variables, and project structure were removed. This leaves users and future agents with no repository-level setup instructions, and the heading itself is malformed.
+`independent-reviewer/hooks/hooks.json:2`-`independent-reviewer/hooks/hooks.json:8` registers an unfiltered global `Stop` hook that runs `codex exec "Review changes since last commit and write results to planning/REVIEW.md"`. Once installed, any Claude stop in this project can spawn Codex, spend tokens, and rewrite the working tree, even for unrelated tasks. Because the command reviews "changes since last commit" and writes into the same diff it reviews, repeated stops can also cause review-output churn that obscures the user's actual changes.
 
-Recommendation: restore the README content, then update only the parts that changed, such as Tapetide vs Massive and INR defaults.
+Recommendation: move this behind an explicit command, or add a wrapper that inspects the hook payload and exits unless the current stop event is specifically requesting the independent review workflow. Also exclude the generated review file from the reviewed diff or write it to an ignored generated path.
 
-### [MEDIUM] The new review agent can recurse instead of performing a review.
+### [MEDIUM] Review output path changes only by case from the tracked file
 
-`.claude/agents/reviewer.md` lines 6-9 instruct the reviewer not to review the changes and instead run `Codex exec "Please review all changes in the project since the last commit and write your feedback to planning/review.md"`. That prompt is the same review task, so invoking this agent can spawn another Codex review process that may load the same instructions and repeat the delegation. It also uses `Codex` with a capital `C`, which may fail on case-sensitive systems where the CLI is `codex`.
+Git tracks `planning/review.md`, but the new marketplace description and hook use `planning/REVIEW.md` (`.claude-plugin/marketplace.json:9`, `independent-reviewer/hooks/hooks.json:8`). On the default case-insensitive macOS filesystem this silently modifies the tracked lowercase file, while on a case-sensitive filesystem it can create a separate uppercase file. That makes plugin output and references platform-dependent.
 
-Recommendation: make the agent perform the review directly, or change the instruction to a non-recursive command that cannot re-trigger the same agent behavior.
+Recommendation: keep the existing lowercase path everywhere, or perform an explicit case-only rename and update all references in one commit.
 
-### [MEDIUM] The plan still contains stale Massive references despite claiming they were all replaced.
+### [LOW] Plugin description has a visible typo
 
-`planning/PLAN.md` line 70 still says real market data comes via Massive API, and line 168 still refers to a "Massive poller." This contradicts the new Section 13 note at line 465 saying all Massive/Polygon.io references were replaced with `TAPETIDE_API_KEY` and `TapetidePoller`.
+`independent-reviewer/.claude-plugin/plugin.json:3` says `independentlyreviews` without a space. This is cosmetic, but it will show up in plugin listings and makes the new plugin look unfinished.
 
-Recommendation: replace the remaining Massive references with Tapetide wording before using the plan as an implementation contract.
+Recommendation: change it to `independently reviews`.
 
 ## Notes
 
-I did not run tests because the current working tree deletes the backend project and test suite, leaving no runnable implementation to validate.
+I did not run tests because the working tree changes are documentation and hook/plugin configuration only, and there is no app or test target present in the repository to execute.

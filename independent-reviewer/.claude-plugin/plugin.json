@@ -1,0 +1,5 @@
+{
+    "name": "independent-reviewer",
+    "description": "A plugin that independentlyreviews changes since the last commit and writes results to planning/REVIEW.md",
+    "version": "1.0.0"
+}
