@@ -1,0 +1,113 @@
+@import "tailwindcss";
+
+@theme inline {
+  --color-terminal: #0d1117;
+  --color-panel: #161b22;
+  --color-border: #30363d;
+  --color-primary: #c9d1d9;
+  --color-muted: #8b949e;
+  --color-accent: #ecad0a;
+  --color-blue: #209dd7;
+  --color-purple: #753991;
+  --color-green: #3fb950;
+  --color-red: #f85149;
+  --color-green-dim: #1a4731;
+  --color-red-dim: #4a1519;
+}
+
+:root {
+  --background: #0d1117;
+  --foreground: #c9d1d9;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: "IBM Plex Sans", "SF Pro Text", system-ui, sans-serif;
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Price flash animations */
+@keyframes flash-up {
+  0% { background-color: #1a4731; }
+  100% { background-color: transparent; }
+}
+
+@keyframes flash-down {
+  0% { background-color: #4a1519; }
+  100% { background-color: transparent; }
+}
+
+.price-flash-up {
+  animation: flash-up 500ms ease-out forwards;
+}
+
+.price-flash-down {
+  animation: flash-down 500ms ease-out forwards;
+}
+
+/* Scrollbars */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0d1117;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #30363d;
+  border-radius: 2px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #8b949e;
+}
+
+/* Terminal font for prices */
+.font-mono {
+  font-family: "IBM Plex Mono", "SF Mono", "Fira Code", Consolas, monospace;
+}
+
+/* Panel borders */
+.panel {
+  background: #161b22;
+  border: 1px solid #30363d;
+}
+
+/* Row hover */
+.hover-row:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+/* Input base */
+.input-base {
+  background: #0d1117;
+  border: 1px solid #30363d;
+  color: #c9d1d9;
+  outline: none;
+  font-family: "IBM Plex Mono", monospace;
+}
+
+.input-base:focus {
+  border-color: #209dd7;
+}
+
+/* Pulse dot */
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.pulse {
+  animation: pulse-dot 2s ease-in-out infinite;
+}

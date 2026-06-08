@@ -137,7 +137,7 @@ class TapetidePoller(MarketDataInterface):
                 tickers_list = list(self._tickers)
                 result = await client.call_tool(
                     "get_batch_quotes",
-                    {"tickers": tickers_list},
+                    {"symbols": tickers_list},
                 )
                 self._process_quotes(result)
         except Exception as exc:  # network errors, auth failures, etc.
@@ -151,17 +151,24 @@ class TapetidePoller(MarketDataInterface):
         """
         Parse the raw FastMCP call result and update the price cache.
 
-        FastMCP v2 returns a list of content items (TextContent, …).
-        Each TextContent.text may contain JSON with one of several shapes:
-          - list of {"ticker": …, "price"/"last_price"/"ltp": …}
+        FastMCP v2 returns a CallToolResult with a .content list of TextContent
+        items.  Each TextContent.text may contain JSON with one of several shapes:
+          - {"data": [{"symbol": …, "price": …}, …], "meta": {…}}   (Tapetide)
+          - list of {"ticker"/"symbol": …, "price"/"last_price"/"ltp": …}
           - dict mapping ticker → {"price"/"last_price"/"ltp": …}
+          - dict mapping ticker → scalar price
         """
         if not result:
             return
 
         now = datetime.now(timezone.utc).isoformat()
 
-        # --- unwrap FastMCP content items ---
+        # --- unwrap CallToolResult (fastmcp v2 wraps results in this object) ---
+        content_items = getattr(result, "content", None)
+        if content_items is not None:
+            result = content_items  # treat the .content list as the raw result
+
+        # --- unwrap list of TextContent items ---
         raw: Any = result
         if isinstance(result, list):
             had_text_content = False
@@ -185,6 +192,10 @@ class TapetidePoller(MarketDataInterface):
                 elif result and not hasattr(result[0], "text"):
                     # plain Python list (e.g. from tests)
                     raw = result
+
+        # --- unwrap Tapetide envelope {"data": [...], "meta": {...}} ---
+        if isinstance(raw, dict) and "data" in raw and isinstance(raw["data"], list):
+            raw = raw["data"]
 
         # --- dispatch on shape ---
         if isinstance(raw, list):

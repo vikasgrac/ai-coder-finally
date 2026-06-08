@@ -1,0 +1,36 @@
+version: "3.9"
+
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    environment:
+      LLM_MOCK: "true"
+      TAPETIDE_API_KEY: ""
+      OPENROUTER_API_KEY: "mock-key"
+    ports:
+      - "8000:8000"
+    volumes:
+      - test-db:/app/db
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  playwright:
+    image: mcr.microsoft.com/playwright:v1.40.0-jammy
+    depends_on:
+      app:
+        condition: service_healthy
+    volumes:
+      - ./e2e:/tests
+    working_dir: /tests
+    environment:
+      BASE_URL: "http://app:8000"
+    command: ["npx", "playwright", "test", "--reporter=line"]
+
+volumes:
+  test-db:
